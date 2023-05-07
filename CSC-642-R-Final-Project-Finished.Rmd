@@ -1,0 +1,581 @@
+---
+title: "CSC 642 Flight Prediction Project "
+author: "Nicholas Gdula"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+flightdata <- read.csv("FlightDataset.csv")
+head(flightdata)
+```
+
+
+```{r}
+usedf <- subset(flightdata, select = -c(1, 3) )
+head(usedf)
+attach(usedf)
+```
+
+```{r}
+num_missing_values <- apply(usedf, 2, function(x) sum(is.na(x)))
+
+# Print the number of missing values for each column
+print(num_missing_values)
+```
+
+```{r}
+library(ggplot2)
+library(gridExtra)
+
+p1 <- ggplot(usedf, aes(x = price)) +
+  geom_boxplot() +
+  coord_flip() +
+  theme_bw() +
+  labs(x = "Price") +
+  ggtitle("Boxplot of Price") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p2 <- ggplot(usedf, aes(x = price)) +
+  geom_histogram(aes(y = ..density..), color = "black", fill = "lightblue", alpha = 0.7, bins = 30) +
+  geom_density(alpha = 0.2, fill = "orange") +
+  theme_bw() +
+  labs(x = "Price", y = "Density") +
+  ggtitle("Histogram of Price") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(p1, p2, nrow = 1, widths = c(1, 2))
+```
+
+```{r}
+ggplot(usedf[order(usedf$price), ], aes(x = airline, y = price, fill = class)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Airline prices based on the class and company", x = "Airline", y = "Price") +
+  theme(plot.title = element_text(size = 15, hjust = 0.5))
+```
+
+```{r}
+library(dplyr)
+df_temp <- usedf %>% group_by(days_left) %>% summarize(mean_price = mean(price))
+
+ggplot(df_temp, aes(x = days_left, y = mean_price)) +
+  geom_point() +
+  labs(title = "Average prizes depending on the days left", x = "Days left", y = "Average price") +
+  theme(plot.title = element_text(size = 15, hjust = 0.5)) +
+  ylim(0, max(df_temp$mean_price) * 1.1) +
+  xlim(0, max(df_temp$days_left) * 1.1)
+```
+
+```{r}
+df_temp <- aggregate(price ~ duration, data = usedf, mean)
+ggplot(df_temp, aes(x = duration, y = price)) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, color = "red") +
+  labs(title = "Average prices depending on the duration", x = "Duration", y = "Price") +
+  theme_minimal()
+```
+
+```{r}
+# plot 1 - departure time vs price
+ggplot(usedf, aes(x = departure_time, y = price)) +
+  geom_boxplot(show.legend = FALSE, outlier.shape = NA) +
+  ggtitle("Airline prices based on the departure time") +
+  theme(plot.title = element_text(size=15)) +
+  ylab("Price")
+```
+
+```{r}
+# plot 2 - arrival time vs price
+ggplot(usedf, aes(x = arrival_time, y = price)) +
+  geom_boxplot(show.legend = FALSE, outlier.shape = NA) +
+  ggtitle("Airline prices based on the arrival time") +
+  theme(plot.title = element_text(size=15)) +
+  ylab("Price")
+```
+
+```{r}
+ggplot(usedf[usedf$class == "Economy",], aes(x=airline, y=price, fill=stops)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  labs(title="Airline prices based on the number of stops for economy", x="Airline", y="Price") +
+  theme(plot.title = element_text(size=15), axis.title.x = element_text(size=15), axis.title.y = element_text(size=15))
+```
+
+```{r}
+
+ggplot(usedf[usedf$class == "Business",], aes(x=airline, y=price, fill=stops)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  labs(title="Airline prices based on the number of stops for business", x="Airline", y="Price") +
+  theme(plot.title = element_text(size=15), axis.title.x = element_text(size=15), axis.title.y = element_text(size=15))
+```
+
+
+```{r}
+preprocessing <- function(df) {
+  
+  # Encode the ordinal variables "stops" and "class".
+  usedf$stops <- factor(usedf$stops, levels = c("zero", "one", "two_or_more"))
+  usedf$class <- factor(usedf$class, levels = c("Economy", "Business"))
+  usedf$stops <- as.integer(usedf$stops) - 1
+  usedf$class <- as.integer(usedf$class) - 1
+  
+  # Create the dummy variables for the cities, the times and the airlines.
+  dummies_variables <- c("airline","source_city","destination_city","departure_time","arrival_time")
+  dummies <- as.data.frame(model.matrix(~ . - 1, data = usedf[, dummies_variables]))
+  colnames(dummies) <- gsub(" ", ".", colnames(dummies))
+  usedf <- cbind(usedf, dummies)
+  
+  # Remove the original variables used for the dummies.
+  usedf <- usedf[, !(names(df) %in% dummies_variables)]
+  
+  return(usedf)
+}
+
+df_preprocessed <- preprocessing(usedf)
+```
+
+```{r}
+df_preprocessed
+```
+
+```{r}
+df_preprocessed_numeric <- select_if(df_preprocessed, is.numeric)
+cor(df_preprocessed_numeric)
+```
+
+
+```{r}
+library(corrplot)
+corr_matrix <- cor(df_preprocessed_numeric)
+corrplot(corr_matrix, method = "circle")
+
+```
+
+
+```{r}
+index <- sample(1:nrow(df_preprocessed_numeric), 0.7 * nrow(df_preprocessed_numeric))
+train <- df_preprocessed_numeric[index,]
+test <- df_preprocessed_numeric[-index,]
+head(train)
+head(test)
+nrow(train)
+nrow(test)
+```
+
+```{r, warning=FALSE}
+library(caret)
+library(glmnet)
+library(xgboost)
+library(kknn)
+library(rpart)
+library(MASS)
+library(e1071)
+library(randomForest)
+library(tibble)
+```
+
+```{r}
+set.seed(99)
+```
+Linear Regression
+```{r}
+# Set up 10-fold cross-validation
+folds <- createFolds(train$price, k = 10, list = TRUE, returnTrain = FALSE)
+
+# Initialize RMSE vector
+rmse <- rep(0, length(folds))
+
+# Loop through each fold
+for (i in 1:length(folds)) {
+  # Split the data into training and validation sets
+  train_cv <- train[-folds[[i]], ]
+  valid_cv <- train[folds[[i]], ]
+  
+  # Fit the linear regression model on the training set
+  model_lm <- lm(price ~ ., data = train_cv)
+  
+  # Make predictions on the validation set
+  preds_lm <- predict(model_lm, newdata = valid_cv)
+  
+  # Calculate the RMSE for this fold
+  rmse[i] <- RMSE(preds_lm, valid_cv$price)
+}
+
+# Print the mean RMSE across all folds
+cat("Mean RMSE:", mean(rmse), "\n")
+
+# Fit the final model on the full training set
+lmmodel <- lm(price ~ ., data = train)
+
+# Make predictions on the test set
+preds <- predict(lmmodel, newdata = test)
+
+# Calculate the RMSE on the test set
+LMtest_rmse <- RMSE(preds, test$price)
+cat("Test RMSE:", LMtest_rmse, "\n")
+
+
+```
+```{r}
+preds[1]
+test$price[1]
+
+preds[10]
+test$price[10]
+
+preds[20]
+test$price[20]
+```
+Bagging
+```{r}
+# Set the number of bags
+num_bags <- 10
+
+# Initialize RMSE vector
+BAGrmse <- rep(0, num_bags)
+
+# Loop through each bag
+for (i in 1:num_bags) {
+  # Sample the training data with replacement
+  index <- sample(nrow(train), replace = TRUE)
+  train_bag <- train[index, ]
+  
+  # Fit the linear regression model on the bagged training set
+  model_bag <- lm(price ~ ., data = train_bag)
+  
+  # Make predictions on the test set
+  preds <- predict(model_bag, newdata = test)
+  
+  # Calculate the RMSE for this bag
+  BAGrmse[i] <- RMSE(preds, test$price)
+}
+
+# Print the mean RMSE across all bags
+cat("Mean RMSE:", mean(BAGrmse), "\n")
+cat("Best RMSE:", min(BAGrmse), "\n")
+
+BagRMSE <- min(BAGrmse)
+
+preds[1]
+test$price[1]
+
+preds[10]
+test$price[10]
+
+preds[20]
+test$price[20]
+```
+
+Ridge Regression
+```{r}
+# Set up 10-fold cross-validation
+folds <- createFolds(train$price, k = 10, list = TRUE, returnTrain = FALSE)
+
+# Initialize RMSE vector
+rmse <- rep(0, length(folds))
+
+# Set the lambda sequence for Ridge regression
+lambda_seq <- 10^seq(10, -2, length.out = 100)
+
+# Loop through each fold
+for (i in 1:length(folds)) {
+  # Split the data into training and validation sets
+  train_cv <- train[-folds[[i]], ]
+  valid_cv <- train[folds[[i]], ]
+  
+  # Fit the Ridge regression model on the training set using cross-validation
+  model_ridge <- cv.glmnet(as.matrix(train_cv[-1]), train_cv$price,
+                           alpha = 0, lambda = lambda_seq,
+                           nfolds = 10, type.measure = "mse")
+  
+  # Make predictions on the validation set
+  preds_ridge <- predict(model_ridge, newx = as.matrix(valid_cv[-1]))
+  
+  # Calculate the RMSE for this fold
+  rmse[i] <- RMSE(preds_ridge, valid_cv$price)
+}
+
+# Print the mean RMSE across all folds
+cat("Mean RMSE:", mean(rmse), "\n")
+
+# Fit the final Ridge regression model on the full training set
+final_model_ridge <- glmnet(as.matrix(train[-1]), train$price, alpha = 0, lambda = lambda_seq)
+
+# Find the optimal value of lambda based on cross-validation
+cvfit <- cv.glmnet(as.matrix(train[-1]), train$price, alpha = 0, lambda = lambda_seq,
+                   nfolds = 10, type.measure = "mse")
+opt_lambda <- cvfit$lambda.min
+
+# Make predictions on the test set using the optimal lambda value
+preds_ridge <- predict(final_model_ridge, newx = as.matrix(test[-1]), s = opt_lambda)
+
+# Calculate the RMSE on the test set
+Ridgetest_rmse <- RMSE(preds_ridge, test$price)
+cat("Test RMSE:", Ridgetest_rmse, "\n")
+
+```
+
+```{r}
+preds_ridge[1]
+test$price[1]
+
+preds_ridge[10]
+test$price[10]
+
+preds_ridge[20]
+test$price[20]
+```
+
+Lasso Model
+```{r}
+# Set up 10-fold cross-validation
+folds <- createFolds(train$price, k = 10, list = TRUE, returnTrain = FALSE)
+
+# Initialize RMSE vector
+rmse <- rep(0, length(folds))
+
+# Set up a range of lambda values to test
+alphas <- c(0.001, 0.01, 0.1, 0.5, 1)
+
+# Loop through each fold
+for (i in 1:length(folds)) {
+  # Split the data into training and validation sets
+  train_cv <- train[-folds[[i]], ]
+  valid_cv <- train[folds[[i]], ]
+  
+  # Fit the Lasso regression model on the training set
+  model_lasso <- glmnet(as.matrix(train_cv[, -1]), train_cv$price, alpha = 1, lambda = alphas)
+  
+  # Make predictions on the validation set
+  preds_lasso <- predict(model_lasso, newx = as.matrix(valid_cv[, -1]))
+  
+  # Calculate the RMSE for this fold
+  rmse[i] <- RMSE(preds_lasso, valid_cv$price)
+}
+
+# Print the mean RMSE across all folds
+cat("Mean RMSE:", mean(rmse), "\n")
+
+# Find the best lambda value based on the minimum RMSE
+best_lambda <- alphas[which.min(rmse)]
+rmse
+# Fit the final model on the full training set using the best lambda value
+model_lasso <- glmnet(as.matrix(train[, -1]), train$price, alpha = 1, lambda = best_lambda)
+lassomodel <- as.data.frame(coef(model_lasso, s = best_lambda)[-1,])
+
+# Make predictions on the test set
+preds <- predict(model_lasso, newx = as.matrix(test[, -1]))
+
+# Calculate the RMSE on the test set
+Lassotest_rmse <- RMSE(preds, test$price)
+cat("Test RMSE:", Lassotest_rmse, "\n")
+```
+
+```{r}
+preds[1]
+test$price[1]
+
+preds[10]
+test$price[10]
+
+preds[20]
+test$price[20]
+```
+LDA
+```{r}
+# Set up 10-fold cross-validation
+folds <- createFolds(train$price, k = 10, list = TRUE, returnTrain = FALSE)
+
+# Initialize RMSE vector
+rmse <- rep(0, length(folds))
+
+# Loop through each fold
+for (i in 1:length(folds)) {
+  # Split the data into training and validation sets
+  train_cv <- train[-folds[[i]], ]
+  valid_cv <- train[folds[[i]], ]
+  
+  # Fit the LDA model on the training set
+  model_lda <- lda(price ~ ., data = train_cv)
+  
+  # Make predictions on the validation set
+  preds_lda <- predict(model_lda, newdata = valid_cv)
+  
+  # Calculate the RMSE for this fold
+  rmse[i] <- RMSE(preds_lda$x, valid_cv$price)
+}
+
+# Print the mean RMSE across all folds
+cat("Mean RMSE:", mean(rmse), "\n")
+
+# Fit the final model on the full training set
+model_lda <- lda(price ~ ., data = train)
+ldamodel <- as.data.frame(model_lda$scaling)
+
+# Make predictions on the test set
+preds <- predict(model_lda, newdata = test)
+
+# Calculate the RMSE on the test set
+LDAtest_rmse <- RMSE(preds$x, test$price)
+cat("Test RMSE:", LDAtest_rmse, "\n")
+
+preds[1]
+test$price[1]
+
+preds[10]
+test$price[10]
+
+preds[20]
+test$price[20]
+```
+
+Decision Tree
+```{r}
+library(rpart)
+
+# Set up 10-fold cross-validation
+folds <- createFolds(train$price, k = 10, list = TRUE, returnTrain = FALSE)
+
+# Initialize RMSE vector
+rmse <- rep(0, length(folds))
+
+# Loop through each fold
+for (i in 1:length(folds)) {
+  # Split the data into training and validation sets
+  train_cv <- train[-folds[[i]], ]
+  valid_cv <- train[folds[[i]], ]
+  
+  # Fit the decision tree model on the training set
+  model_dt <- rpart(price ~ ., data = train_cv)
+  
+  # Make predictions on the validation set
+  preds_dt <- predict(model_dt, newdata = valid_cv)
+  
+  # Calculate the RMSE for this fold
+  rmse[i] <- RMSE(preds_dt, valid_cv$price)
+}
+
+# Print the mean RMSE across all folds
+cat("Mean RMSE:", mean(rmse), "\n")
+
+# Fit the final model on the full training set
+dtmodel <- rpart(price ~ ., data = train)
+
+# Make predictions on the test set
+preds <- predict(dtmodel, newdata = test)
+
+# Calculate the RMSE on the test set
+DTtest_rmse <- RMSE(preds, test$price)
+cat("Test RMSE:", DTtest_rmse, "\n")
+
+preds[1]
+test$price[1]
+
+preds[10]
+test$price[10]
+
+preds[20]
+test$price[20]
+```
+
+Support Vector Regression
+```{r}
+# Set up 10-fold cross-validation
+folds <- createFolds(train$price, k = 10, list = TRUE, returnTrain = FALSE)
+
+# Initialize RMSE vector
+rmse <- rep(0, length(folds))
+
+# Loop through each fold
+for (i in 1:length(folds)) {
+  # Split the data into training and validation sets
+  train_cv <- train[-folds[[i]], ]
+  valid_cv <- train[folds[[i]], ]
+  
+  # Fit the support vector regression model on the training set
+  model_svr <- svm(price ~ ., data = train_cv, kernel = "radial", cost = 10, gamma = 0.1)
+  
+  # Make predictions on the validation set
+  preds_svr <- predict(model_svr, newdata = valid_cv)
+  
+  # Calculate the RMSE for this fold
+  rmse[i] <- RMSE(preds_svr, valid_cv$price)
+}
+
+# Print the mean RMSE across all folds
+cat("Mean RMSE:", mean(rmse), "\n")
+
+# Fit the final model on the full training set
+svmmodel <- svm(price ~ ., data = train, kernel = "radial", cost = 10, gamma = 0.1)
+
+# Make predictions on the test set
+preds <- predict(svmmodel, newdata = test)
+
+# Calculate the RMSE on the test set
+SVMtest_rmse <- RMSE(preds, test$price)
+cat("Test RMSE:", SVMtest_rmse, "\n")
+```
+--------------
+
+Random Forest
+```{r}
+# Set up 10-fold cross-validation
+folds <- createFolds(train$price, k = 10, list = TRUE, returnTrain = FALSE)
+
+# Initialize RMSE vector
+rmse <- rep(0, length(folds))
+
+# Loop through each fold
+for (i in 1:length(folds)) {
+  # Split the data into training and validation sets
+  train_cv <- train[-folds[[i]], ]
+  valid_cv <- train[folds[[i]], ]
+  
+  # Fit the random forest model on the training set
+  model_rf <- randomForest(price ~ ., data = train_cv, ntree = 50, mtry = sqrt(ncol(train_cv) - 1))
+  
+  # Make predictions on the validation set
+  preds_rf <- predict(model_rf, newdata = valid_cv)
+  
+  # Calculate the RMSE for this fold
+  rmse[i] <- RMSE(preds_rf, valid_cv$price)
+}
+
+# Print the mean RMSE across all folds
+cat("Mean RMSE:", mean(rmse), "\n")
+
+# Find the best value of ntree based on the minimum RMSE
+best_ntree <- ntree_vals[which.min(rmse)]
+
+# Fit the final model on the full training set using the best value of ntree
+model_rf <- randomForest(price ~ ., data = train, ntree = best_ntree, mtry = sqrt(ncol(train) - 1))
+rfmodel <- as.data.frame(importance(model_rf, type = 2))
+
+# Make predictions on the test set
+preds <- predict(model_rf, newdata = test)
+
+# Calculate the RMSE on the test set
+RFtest_rmse <- RMSE(preds, test$price)
+cat("Test RMSE:", RFtest_rmse, "\n")
+
+preds[1]
+test$price[1]
+
+preds[10]
+test$price[10]
+
+preds[20]
+test$price[20]
+```
+
+```{r}
+# Create a table of RMSE results
+rmsetable <- tibble(
+  Model = c("Linear Regression", "Bagging", "Ridge Regression", "Lasso", "LDA", "Decision Tree", "Support Vector Regression", "Random Forest"),
+  RMSE = c(LMtest_rmse, BagRMSE, Ridgetest_rmse, Lassotest_rmse, "LDAtest_rmse", DTtest_rmse, "SVMtest_rmse", "RFtest_rmse")
+)
+
+
+rmsetable
+
+```
+
